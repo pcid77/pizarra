@@ -223,18 +223,24 @@ function parseTsvBoard(tsvRaw) {
   return { name: "Importado TSV", nodes, connections: [] };
 }
 
-function applyImportedBoard(boardData) {
-  if (!options.skipUndo) pushUndoState();
+function applyImportedBoard(boardData, options = {}) {
+  // importJson() ya hace pushUndoState(); aquí solo si se fuerza explícitamente.
+  if (options.pushUndo) pushUndoState();
+
   const id = crypto.randomUUID();
+
   const nodes = (boardData.nodes || []).map((n, i) => ({
     id: n.id || crypto.randomUUID(),
     type: n.type || "note",
     x: Number.isFinite(n.x) ? n.x : 120 + i * 25,
     y: Number.isFinite(n.y) ? n.y : 100 + i * 25,
-    width: Number.isFinite(n.width) ? n.width : 300,
-    height: Number.isFinite(n.height) ? n.height : n.type === "timeline" ? 220 : 190,
-    title: n.title || { note: "Nota", image: "Imagen", video: "Video", timeline: "Línea de tiempo" }[n.type || "note"],
-    data: n.data || {},
+    width: Number.isFinite(n.width) ? n.width : 320,
+    height: Number.isFinite(n.height) ? n.height : (n.type === "timeline" ? 240 : 200),
+    title:
+      n.title ||
+      { note: "Nota", image: "Imagen", video: "Video", timeline: "Línea de tiempo" }[n.type || "note"] ||
+      "Nota",
+    data: n.data || { text: "" },
     pillScale: Number.isFinite(n.pillScale) ? n.pillScale : 1,
     pillColor: typeof n.pillColor === "string" ? n.pillColor : "#7ef3ff",
   }));
@@ -252,6 +258,7 @@ function applyImportedBoard(boardData) {
   };
   state.activeBoardId = id;
 }
+
 
 function exportCurrentBoardJson() {
   const board = activeBoard();
@@ -418,7 +425,7 @@ function renderBoard() {
     const colorBtn = el.querySelector(".pill-color");
     smallerBtn.style.display = canResizePill ? "inline-block" : "none";
     biggerBtn.style.display = canResizePill ? "inline-block" : "none";
-    colorBtn.style.display = canResizePill ? "inline-block" : "none";
+    if (colorBtn) colorBtn.style.display = canResizePill ? "inline-block" : "none";
     if (canResizePill) {
       smallerBtn.addEventListener("click", (ev) => {
         ev.stopPropagation();
@@ -454,10 +461,12 @@ function renderBoard() {
       });
       el.querySelector(".header-actions").append(palette);
 
-      colorBtn.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        palette.classList.toggle("open");
-      });
+      if (colorBtn) {
+        colorBtn.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          palette.classList.toggle("open");
+        });
+      }
     }
 
     el.querySelector(".delete").addEventListener("click", (ev) => {
