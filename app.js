@@ -59,18 +59,6 @@ function bindUI() {
     renderBoard();
   });
 
-  els.openJsonImport.addEventListener("click", () => {
-    els.jsonInput.value = "";
-    els.jsonMessage.textContent = "";
-    els.jsonDialog.showModal();
-  });
-
-  els.exportJson.addEventListener("click", exportCurrentBoardJson);
-  els.cancelJson.addEventListener("click", () => els.jsonDialog.close("cancel"));
-  els.jsonForm.addEventListener("submit", (e) => {
-    e.preventDefault();
-    importJson(els.jsonInput.value);
-  });
 
   els.addEventRow.addEventListener("click", () => addTimelineRow("event"));
   els.addPeriodRow.addEventListener("click", () => addTimelineRow("period"));
@@ -216,13 +204,8 @@ function applyImportedBoard(boardData) {
 
 function exportCurrentBoardJson() {
   const board = activeBoard();
-  if (!board) return;
-  const payload = JSON.stringify({ name: board.name, nodes: board.nodes, connections: board.connections }, null, 2);
-  navigator.clipboard.writeText(payload).then(() => {
-    alert("JSON copiado al portapapeles.");
-  }).catch(() => {
-    prompt("Copia este JSON:", payload);
-  });
+  if (!board) return null;
+  return { name: board.name, nodes: board.nodes, connections: board.connections, exportedAt: new Date().toISOString() };
 }
 
 async function addNode(type) {
@@ -342,10 +325,31 @@ function renderBoard() {
     el.style.setProperty("--pill-scale", node.pillScale || 1);
 
     const content = el.querySelector(".content");
-    if (node.type === "note") content.innerHTML = `<div class="note-pill">${escapeHtml(node.data.text || "")}</div>`;
+    if (node.type === "note") content.innerHTML = `<div class="note-pill" contenteditable="true">${escapeHtml(node.data.text || "")}</div>`;
     if (node.type === "image") content.innerHTML = `<img src="${node.data.url}" alt="Imagen" />`;
     if (node.type === "video") content.innerHTML = videoEmbed(node.data.url);
-    if (node.type === "timeline") content.append(timeline(node.data.items || []));
+    if (node.type === "timeline") content.append(timeline(node.data.items || [], node));
+
+
+    if (node.type === "note") {
+      const notePill = content.querySelector(".note-pill");
+      notePill.addEventListener("input", () => {
+        node.data.text = notePill.textContent || "";
+        save();
+      });
+    }
+
+    if (node.type === "timeline") {
+      content.querySelectorAll("[data-edit-kind]").forEach((editable) => {
+        editable.addEventListener("input", () => {
+          const index = Number(editable.dataset.index);
+          const field = editable.dataset.field;
+          if (!node.data.items || !node.data.items[index]) return;
+          node.data.items[index][field] = editable.textContent || "";
+          save();
+        });
+      });
+    }
 
 
     const canResizePill = node.type === "note" || node.type === "timeline";
@@ -380,13 +384,13 @@ function renderBoard() {
 
     let moved = false;
     el.addEventListener("mousedown", (ev) => {
-      if (ev.button !== 0 || ev.target.closest(".resize-handle")) return;
+      if (ev.button !== 0 || ev.target.closest(".resize-handle") || ev.target.closest("[contenteditable=\"true\"]")) return;
       moved = false;
       dragNode(ev, node, () => { moved = true; });
     });
     el.addEventListener("click", (ev) => {
       ev.stopPropagation();
-      if (!state.connectMode || moved) return;
+      if (!state.connectMode || moved || ev.target.closest("[contenteditable=\"true\"]")) return;
       connectNode(node.id);
     });
 
@@ -409,17 +413,17 @@ function connectNode(targetId) {
   renderBoard();
 }
 
-function timeline(items) {
+function timeline(items, node) {
   const wrap = document.createElement("div");
   wrap.className = "timeline-wrap";
   if (!items.length) { wrap.textContent = "Sin eventos todavía."; return wrap; }
 
-  const parsed = items.map((item) => {
+  const parsed = items.map((item, index) => {
     const start = item.kind === "event" ? parseDate(item.date) : parseDate(item.start);
     const end = item.kind === "period" ? parseDate(item.end) : start;
     if (!start || !end) return null;
-    return { ...item, _start: start, _end: end };
-  }).filter(Boolean).sort((a,b)=>a._start-b._start);
+    return { ...item, _start: start, _end: end, _index: index };
+  }).filter(Boolean);
 
   if (!parsed.length) { wrap.textContent = "Fechas inválidas en la línea de tiempo."; return wrap; }
 
@@ -435,13 +439,13 @@ function timeline(items) {
       period.className = "timeline-period";
       period.style.left = `${((item._start - min) / range) * 100}%`;
       period.style.width = `${Math.max(4, ((item._end - item._start) / range) * 100)}%`;
-      period.innerHTML = `<span>${item.label} (${item.start} → ${item.end})</span>`;
+      period.innerHTML = `<span data-edit-kind="timeline" data-index="${item._index}" data-field="label" contenteditable="true">${escapeHtml(item.label || "Periodo")}</span>`;
       track.append(period);
     } else {
       const mark = document.createElement("div");
       mark.className = "timeline-event";
       mark.style.left = `${((item._start - min) / range) * 100}%`;
-      mark.innerHTML = `<strong>${item.label}</strong><small>${item.date}</small>`;
+      mark.innerHTML = `<strong data-edit-kind="timeline" data-index="${item._index}" data-field="label" contenteditable="true">${escapeHtml(item.label || "Evento")}</strong><small data-edit-kind="timeline" data-index="${item._index}" data-field="date" contenteditable="true">${escapeHtml(item.date || "")}</small>`;
       track.append(mark);
     }
   });
@@ -568,3 +572,132 @@ function load() {
 function save() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ boards: state.boards, activeBoardId: state.activeBoardId, viewport: state.viewport }));
 }
+
+
+/***************************************
+ * IMPORT / EXPORT JSON + TSV (PEGAR TAL CUAL)
+ ***************************************/
+(() => {
+  const btnOpen = document.getElementById("openJsonImport");
+  const btnExport = document.getElementById("exportJson");
+  const dialog = document.getElementById("jsonDialog");
+  const form = document.getElementById("jsonForm");
+  const ta = document.getElementById("jsonInput");
+  const msg = document.getElementById("jsonMessage");
+  const btnCancel = document.getElementById("cancelJson");
+
+  if (!btnOpen || !btnExport || !dialog || !form || !ta) return;
+
+  function setMessage(text, type = "info") {
+    if (!msg) return;
+    msg.textContent = text;
+    msg.dataset.type = type;
+  }
+
+  function looksLikeJSON(s) {
+    const t = s.trim();
+    return t.startsWith("{") || t.startsWith("[");
+  }
+
+  function parseTSV(tsv) {
+    const raw = tsv.replace(/\r/g, "").trim();
+    if (!raw) return [];
+    const lines = raw.split("\n").filter(Boolean);
+    if (lines.length < 2) return [];
+    const header = lines[0].split("\t").map((h) => h.trim());
+    return lines.slice(1).map((line) => {
+      const cols = line.split("\t");
+      const obj = {};
+      header.forEach((h, i) => (obj[h] = (cols[i] ?? "").trim()));
+      return obj;
+    });
+  }
+
+  function downloadJSON(obj, filename = "pizarra.json") {
+    const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  btnOpen.addEventListener("click", () => {
+    ta.value = "";
+    setMessage("Pega JSON o TSV y pulsa Aplicar.", "info");
+    dialog.showModal();
+    ta.focus();
+  });
+
+  btnCancel?.addEventListener("click", () => dialog.close());
+
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const input = ta.value.trim();
+    if (!input) {
+      setMessage("No hay datos para importar.", "error");
+      return;
+    }
+
+    try {
+      if (looksLikeJSON(input)) {
+        importJson(input);
+      } else {
+        const rows = parseTSV(input);
+        if (!rows.length) throw new Error("TSV vacío o inválido.");
+
+        const headerKeys = Object.keys(rows[0] || {}).map((k) => k.toLowerCase());
+        const isConnections = headerKeys.includes("from") && headerKeys.includes("to");
+
+        if (isConnections) {
+          importJson(JSON.stringify({ name: "Importado TSV", nodes: [], connections: rows }));
+        } else {
+          const nodes = rows.map((r) => ({
+            id: r.id || r.ID || undefined,
+            type: r.type || r.tipo || "note",
+            title: r.title || r.titulo || r.name || "",
+            data: {
+              text: r.text || r.descripcion || r.content || "",
+              url: r.url || "",
+              items:
+                r.type === "timeline" || r.tipo === "timeline"
+                  ? [
+                      ...(r.date ? [{ kind: "event", label: r.label || r.title || "Evento", date: r.date }] : []),
+                      ...(r.start && r.end ? [{ kind: "period", label: r.label || r.title || "Periodo", start: r.start, end: r.end }] : []),
+                    ]
+                  : undefined,
+            },
+            x: Number(r.x) || undefined,
+            y: Number(r.y) || undefined,
+            width: Number(r.width) || undefined,
+            height: Number(r.height) || undefined,
+            pillScale: Number(r.pillScale || r.pillscale) || undefined,
+          }));
+          importJson(JSON.stringify({ name: "Importado TSV", nodes, connections: [] }));
+        }
+      }
+
+      setMessage("Importación completada.", "ok");
+      dialog.close();
+    } catch (e) {
+      console.error(e);
+      setMessage(`Error al importar: ${e.message}`, "error");
+    }
+  });
+
+  btnExport.addEventListener("click", () => {
+    try {
+      const obj = exportCurrentBoardJson();
+      if (!obj) throw new Error("No hay pizarra activa.");
+      const fname = `${(obj.name || "pizarra").replace(/[^a-zA-Z0-9-_]+/g, "_")}.json`;
+      downloadJSON(obj, fname);
+      setMessage("Exportación lista (descargando JSON).", "ok");
+    } catch (e) {
+      console.error(e);
+      setMessage(`Error al exportar: ${e.message}`, "error");
+    }
+  });
+})();
